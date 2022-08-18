@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "mysubdomain.example.org"
+  },
+  {
+    "ParameterKey": "TimeToLive",
+    "ParameterValue": "60"
+  },
+  {
+    "ParameterKey": "VerifiedEmailAddress",
+    "ParameterValue": "replaceme@example.org"
+  }
+]

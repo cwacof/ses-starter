@@ -1,0 +1,157 @@
+# This is the SAM template that represents the architecture of your serverless application
+# https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-template-basics.html
+
+# The AWSTemplateFormatVersion identifies the capabilities of the template
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/format-version-structure.html
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Creates a hosted zone, email identity, and rules to receive emails to S3.
+
+# Transform section specifies one or more macros that AWS CloudFormation uses to process your template
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/transform-section-structure.html
+Transform:
+- AWS::Serverless-2016-10-31
+
+# Resources declares the AWS resources that you want to include in the stack
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/resources-section-structure.html
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Tracing: Active
+  Api:
+    TracingEnabled: True
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: mail.example.org
+    Description: Domain for which the application will receive email.
+  TimeToLive:
+    Type: Number
+    Default: 60
+    Description: Time in seconds to cache DNS records (MX, DKIM).
+  VerifiedEmailAddress:
+    Type: String
+    Default: replaceme@example.org
+    Description: An address SES can send to, once verified, even in sandbox mode.
+
+Resources:
+
+  # Create a hosted zone for our domain for SES to receive email.
+  # This costs $.50/month
+  DnsZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+
+  # Create an MX record. AWS uses a standard convention for SES.
+  MxRecord:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneId: !Ref DnsZone
+      Type: MX
+      TTL: !Ref TimeToLive
+      ResourceRecords: ['10 inbound-smtp.us-east-1.amazonaws.com']
+
+  # DKIM Records come from our EmailIdentity below.
+  # We will need to add three entries to complete verification.
+  Dkim1:
+    Type: AWS::Route53::RecordSet
+    DependsOn: SesEmailIdentity
+    Properties:
+      Name: !GetAtt SesEmailIdentity.DkimDNSTokenName1
+      HostedZoneId: !Ref DnsZone
+      TTL: !Ref TimeToLive
+      Type: CNAME
+      ResourceRecords: [!GetAtt SesEmailIdentity.DkimDNSTokenValue1]
+  Dkim2:
+    Type: AWS::Route53::RecordSet
+    DependsOn: SesEmailIdentity
+    Properties:
+      Name: !GetAtt SesEmailIdentity.DkimDNSTokenName2
+      HostedZoneId: !Ref DnsZone
+      TTL: !Ref TimeToLive
+      Type: CNAME
+      ResourceRecords: [!GetAtt SesEmailIdentity.DkimDNSTokenValue2]
+  Dkim3:
+    Type: AWS::Route53::RecordSet
+    DependsOn: SesEmailIdentity
+    Properties:
+      Name: !GetAtt SesEmailIdentity.DkimDNSTokenName3
+      HostedZoneId: !Ref DnsZone
+      TTL: !Ref TimeToLive
+      Type: CNAME
+      ResourceRecords: [!GetAtt SesEmailIdentity.DkimDNSTokenValue3]
+
+  # We store all of our messages in an S3 Bucket.
+  Inbox:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketName: !Ref DomainName
+
+  # This policy allows an SES rule to write
+  # to the 'incoming' folder of our S3 bucket.
+  InboxPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: Inbox
+    Properties:
+      Bucket: !Ref Inbox
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Principal:
+              Service: "ses.amazonaws.com"
+            Action:
+              - s3:PutObject
+            Effect: Allow
+            Sid: "AllowSESPuts"
+            Resource:
+              Fn::Join: [ '', [ 'arn:aws:s3:::', Ref: DomainName, '/incoming/*' ] ]
+            Condition:
+              StringEquals:
+                "aws:Referer": { Ref: AWS::AccountId }
+
+  # Verifiable EmailIdentity to receive and send email via SES.
+  SesEmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      DkimAttributes:
+        SigningEnabled: true
+      DkimSigningAttributes:
+        NextSigningKeyLength: 'RSA_2048_BIT'
+      EmailIdentity: !Ref DomainName
+      FeedbackAttributes:
+        EmailForwardingEnabled: true
+
+  # A ruleset to contain all our rules for processing emails.
+  # While SES supports rules for S3, SNS, and Lambda...
+  # only S3 gets the full message (up to SES 30MB limit).
+  SesRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: !Ref AWS::StackName
+
+  SesS3Rule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn: InboxPolicy
+    Properties:
+      Rule:
+        Recipients:
+          - !Ref DomainName
+        Actions:
+          - S3Action:
+              BucketName: !Ref Inbox
+              ObjectKeyPrefix: 'incoming/'
+              # TopicArn: 'todo'
+        Enabled: true
+        ScanEnabled: true
+      RuleSetName: !Ref SesRuleSet
+
+  # Email address SES can send to, even in sandbox mode.
+  # Requires verification (click on link in email).
+  SesEmailAddress:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref VerifiedEmailAddress
